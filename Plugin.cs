@@ -1,79 +1,59 @@
 ﻿using System;
 using System.Linq;
 using System.Runtime.InteropServices;
+using Dalamud.Hooking;
 using Dalamud.Plugin;
-using EasyZoom.Attributes;
+using DalamudApi;
 
 namespace EasyZoom
 {
-	public class Plugin : IDalamudPlugin
+	public unsafe class Plugin : IDalamudPlugin
 	{
-		public static DalamudPluginInterface pi;
-		private PluginCommandManager<Plugin> commandManager;
 		public static Configuration config;
 		private PluginUI ui;
 
-		private static IntPtr CamPtr;
-		private static IntPtr CamCollisionJmp;
+		internal static CameraManager* cameraManager = (CameraManager*)FFXIVClientStructs.FFXIV.Client.Game.Control.CameraManager.Instance();
+        private static IntPtr CamCollisionJmp;
 		private static IntPtr CamDistanceResetFunc;
 		private static byte[] CamDistanceOriginalBytes = new byte[8];
 
-		private static int ZoomOffset;
-		private static int FovOffset;
-		private static int AngleOffset;
-		private static int UpDownOffset;
+        public static float zoomDelta = 0.75f;
+        private delegate float GetZoomDeltaDelegate();
+        private static Hook<GetZoomDeltaDelegate> GetZoomDeltaHook;
+        private static float GetZoomDeltaDetour()
+        {
+            return cam->CurrentZoom * 0.075f;
+        }
 
-		public string Name => "EasyZoom";
+        public string Name => "EasyZoom";
 
-		public unsafe void Initialize(DalamudPluginInterface pluginInterface)
+		public unsafe Plugin(DalamudPluginInterface pluginInterface)
 		{
-			ZeroFloat = Marshal.AllocHGlobal(4);
+			api.Initialize(this, pluginInterface);
+
+            var vtbl = cameraManager->WorldCamera->VTable;
+            GetZoomDeltaHook = new(vtbl[28], GetZoomDeltaDetour); // Client__Game__Camera_vf28
+            GetZoomDeltaHook.Enable();
+
+
+            ZeroFloat = Marshal.AllocHGlobal(4);
 			Marshal.StructureToPtr(0f, ZeroFloat, true);
 			MaxFloat = Marshal.AllocHGlobal(4);
 			Marshal.StructureToPtr(10000f, MaxFloat, true);
 			PiFloat = Marshal.AllocHGlobal(4);
 			Marshal.StructureToPtr((float)Math.PI, PiFloat, true);
-			//UpDownMin = Marshal.AllocHGlobal(4);
-			//Marshal.StructureToPtr(-10f, UpDownMin, true);
-			//UpDownMax = Marshal.AllocHGlobal(4);
-			//Marshal.StructureToPtr(10f, UpDownMax, true);
 
-			pi = pluginInterface;
-
-			config = (Configuration)pluginInterface.GetPluginConfig() ?? new Configuration();
+            config = (Configuration)pluginInterface.GetPluginConfig() ?? new Configuration();
 			config.Initialize(pluginInterface);
 
 			this.ui = new PluginUI();
-			pluginInterface.UiBuilder.OnBuildUi += this.ui.Draw;
+			pluginInterface.UiBuilder.Draw += this.ui.Draw;
 
-			this.commandManager = new PluginCommandManager<Plugin>(this, pluginInterface);
-
-			var pf = pluginInterface.TargetModuleScanner;
-			CamPtr = Marshal.ReadIntPtr(pf.GetStaticAddressFromSig("48 8D 0D ?? ?? ?? ?? 45 33 C0 33 D2 C6 40 09 01"));
-			CamCollisionJmp = pf.ScanText("0F 84 ?? ?? ?? ?? F3 0F 10 54 24 60 F3 0F 10 44 24 64 F3 41 0F 5C D5");
-			ZoomOffset = Marshal.ReadInt32(pf.ScanText("F3 0F ?? ?? ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 48 85 ?? 74 ?? F3 0F ?? ?? ?? ?? ?? ?? 48 83 C1") + 4);
-			FovOffset = Marshal.ReadInt32(pf.ScanText("F3 0F ?? ?? ?? ?? ?? ?? 0F 2F ?? ?? ?? ?? ?? 72 ?? F3 0F ?? ?? ?? ?? ?? ?? 48 8B") + 4);
-			AngleOffset = Marshal.ReadInt32(pf.ScanText("F3 0F 10 B3 ?? ?? ?? ?? 48 8D ?? ?? ?? F3 44 ?? ?? ?? ?? ?? ?? ?? F3 44") + 4);
-			//UpDownOffset = Marshal.ReadInt32(pf.ScanText("F3 0F ?? ?? ?? ?? ?? ?? F3 44 ?? ?? ?? ?? ?? ?? ?? 0F 28 ?? F3 0F ?? ?? F3 41") + 4);
-			CamDistanceResetFunc = pf.ScanText("F3 0F 10 05 ?? ?? ?? ?? EB ?? F3 0F 10 05 ?? ?? ?? ?? F3 0F 10 94 24 B0 00 00 00"); // nop 8 bytes
+			CamCollisionJmp = api.SigScanner.ScanText("0F 84 ?? ?? ?? ?? F3 0F 10 54 24 70 41 B7 01 F3 0F 10 44 24 74");
+			CamDistanceResetFunc = api.SigScanner.ScanText("F3 0F 10 05 ?? ?? ?? ?? EB ?? F3 0F 10 05 ?? ?? ?? ?? F3 0F 10 94 24 B0 00 00 00"); // nop 8 bytes
 			Marshal.Copy(CamDistanceResetFunc, CamDistanceOriginalBytes, 0, 8);
-			//Marshal.Copy(CamCollisionJmp, CamCollisionOriginalBytes, 0, 6);
-
-
-			ZoomCurrent = CamPtr + ZoomOffset;
-			ZoomMin = CamPtr + ZoomOffset + 4;
-			ZoomMax = CamPtr + ZoomOffset + 8;
-
-			FovCurrent = CamPtr + FovOffset;
-			FovMin = CamPtr + FovOffset + 4;
-			FovMax = CamPtr + FovOffset + 8;
-
-			AngleMin = CamPtr + AngleOffset;
-			AngleMax = CamPtr + AngleOffset + 4;
-
-			//UpDown = CamPtr + UpDownOffset;
-
-			pi.ClientState.OnLogin += ClientState_OnLogin;
+            
+			api.ClientState.Login += ClientState_OnLogin;
 
 			SetCamDistanceNoReset(true);
 			if (config.NoCollision)
@@ -106,24 +86,24 @@ namespace EasyZoom
 			Marshal.StructureToPtr(config.ZoomMin, ZoomMin, true);
 			Marshal.StructureToPtr(config.ZoomMax, ZoomMax, true);
 		}
+        private static GameCamera* cam => cameraManager->WorldCamera;
 
-		public static IntPtr ZoomCurrent;
-		public static IntPtr ZoomMin;
-		public static IntPtr ZoomMax;
-		public static IntPtr FovCurrent;
-		public static IntPtr FovMin;
-		public static IntPtr FovMax;
+        public static IntPtr ZoomCurrent => (IntPtr)(&cam->CurrentZoom);
+		public static IntPtr ZoomMin => (IntPtr)(&cam->MinZoom);
+		public static IntPtr ZoomMax => (IntPtr)(&cam->MaxZoom);
+		public static IntPtr FovCurrent => (IntPtr)(&cam->MaxFoV);
+		public static IntPtr FovMin => (IntPtr)(&cam->MinFoV);
+		public static IntPtr FovMax => (IntPtr)(&cam->CurrentFoV);
+        public static IntPtr AngleMin => (IntPtr)(&cam->MinVRotation);
+        public static IntPtr AngleMax => (IntPtr)(&cam->MaxVRotation);
 
-		public static IntPtr AngleMin;
-		public static IntPtr AngleMax;
-
-		//public static IntPtr UpDown;
-		//public static IntPtr UpDownMin;
-		//public static IntPtr UpDownMax;
-
+        //public static IntPtr UpDown;
+        //public static IntPtr UpDownMin;
+        //public static IntPtr UpDownMax;
 
 
-		public static IntPtr ZeroFloat;
+
+        public static IntPtr ZeroFloat;
 		public static IntPtr PiFloat;
 		public static IntPtr MaxFloat;
 
@@ -153,7 +133,7 @@ namespace EasyZoom
 				{
 					ResetFovs();
 					ResetZooms(true);
-					pi.Framework.Gui.Chat.Print($"[EasyZoom] Camera settings has been reset.");
+					api.ChatGui.Print($"[EasyZoom] Camera settings has been reset.");
 				}
 				else
 				{
@@ -168,7 +148,7 @@ namespace EasyZoom
 								Marshal.StructureToPtr(value, ZoomMax, true);
 								config.ZoomMax = value;
 								config.Save();
-								pi.Framework.Gui.Chat.Print($"[EasyZoom] Max zoom {value}");
+								api.ChatGui.Print($"[EasyZoom] Max zoom {value}");
 							}
 						}
 						if (argarray[0] == "min")
@@ -178,7 +158,7 @@ namespace EasyZoom
 								Marshal.StructureToPtr(value, ZoomMin, true);
 								config.ZoomMin = value;
 								config.Save();
-								pi.Framework.Gui.Chat.Print($"[EasyZoom] Min zoom {value}");
+								api.ChatGui.Print($"[EasyZoom] Min zoom {value}");
 							}
 						}
 						if (argarray[0] == "current")
@@ -186,7 +166,7 @@ namespace EasyZoom
 							if (float.TryParse(argarray[1], out var value))
 							{
 								Marshal.StructureToPtr(value, ZoomCurrent, true);
-								pi.Framework.Gui.Chat.Print($"[EasyZoom] Current zoom {value}");
+								api.ChatGui.Print($"[EasyZoom] Current zoom {value}");
 							}
 						}
 						if (argarray[0] == "nocollision")
@@ -215,7 +195,7 @@ namespace EasyZoom
 								config.NoCollision ^= true;
 								config.Save();
 							}
-							pi.Framework.Gui.Chat.Print($"[EasyZoom] Camera collision {(config.NoCollision ? "disabled" : "enabled")}.");
+							api.ChatGui.Print($"[EasyZoom] Camera collision {(config.NoCollision ? "disabled" : "enabled")}.");
 						}
 					}
 
@@ -228,7 +208,7 @@ namespace EasyZoom
 		{
 			if (!disposing) return;
 
-			pi.ClientState.OnLogin -= ClientState_OnLogin;
+			api.ClientState.Login -= ClientState_OnLogin;
 
 			SetCamDistanceNoReset(false);
 			SetCamNoCollision(false);
@@ -238,17 +218,16 @@ namespace EasyZoom
 			Marshal.StructureToPtr(Configuration.AngleMinDefault, AngleMin, true);
 			Marshal.StructureToPtr(Configuration.AngleMaxDefault, AngleMax, true);
 
-			this.commandManager.Dispose();
 
-			pi.SavePluginConfig(config);
+            api.PluginInterface.SavePluginConfig(config);
 
-			pi.UiBuilder.OnBuildUi -= this.ui.Draw;
+			api.PluginInterface.UiBuilder.Draw -= this.ui.Draw;
 			Marshal.FreeHGlobal(ZeroFloat);
 			Marshal.FreeHGlobal(MaxFloat);
 			Marshal.FreeHGlobal(PiFloat);
-			//Marshal.FreeHGlobal(UpDownMin);
-			//Marshal.FreeHGlobal(UpDownMax);
-			pi.Dispose();
+            GetZoomDeltaHook?.Dispose();
+
+            api.Dispose();
 		}
 
 		private static void ResetZooms(bool resetCurrent = false)
@@ -275,4 +254,56 @@ namespace EasyZoom
 		}
 		#endregion
 	}
+
+
+    /// <summary>
+    /// https://github.com/UnknownX7/Cammy/blob/master/Structures/CameraManager.cs
+    /// </summary>
+    [StructLayout(LayoutKind.Explicit)]
+    internal unsafe struct CameraManager
+    {
+        [FieldOffset(0x0)] internal GameCamera* WorldCamera;
+        [FieldOffset(0x8)] internal GameCamera* IdleCamera;
+        [FieldOffset(0x10)] internal GameCamera* MenuCamera;
+        [FieldOffset(0x18)] internal GameCamera* SpectatorCamera;
+    }
+
+    /// <summary>
+    /// https://github.com/UnknownX7/Cammy/blob/master/Structures/GameCamera.cs
+    /// </summary>
+    [StructLayout(LayoutKind.Explicit)]
+    internal unsafe struct GameCamera
+    {
+        [FieldOffset(0x0)] public IntPtr* VTable;
+        [FieldOffset(0x60)] public float X;
+        [FieldOffset(0x64)] public float Z;
+        [FieldOffset(0x68)] public float Y;
+        [FieldOffset(0x90)] public float LookAtX; // Position that the camera is focused on (Actual position when zoom is 0)
+        [FieldOffset(0x94)] public float LookAtZ;
+        [FieldOffset(0x98)] public float LookAtY;
+        [FieldOffset(0x114)] public float CurrentZoom; // 6
+        [FieldOffset(0x118)] public float MinZoom; // 1.5
+        [FieldOffset(0x11C)] public float MaxZoom; // 20
+        [FieldOffset(0x120)] public float CurrentFoV; // 0.78
+        [FieldOffset(0x124)] public float MinFoV; // 0.69
+        [FieldOffset(0x128)] public float MaxFoV; // 0.78
+        [FieldOffset(0x12C)] public float AddedFoV; // 0
+        [FieldOffset(0x130)] public float CurrentHRotation; // -pi -> pi, default is pi
+        [FieldOffset(0x134)] public float CurrentVRotation; // -0.349066
+        //[FieldOffset(0x138)] public float HRotationDelta;
+        [FieldOffset(0x148)] public float MinVRotation; // -1.483530, should be -+pi/2 for straight down/up but camera breaks so use -+1.569
+        [FieldOffset(0x14C)] public float MaxVRotation; // 0.785398 (pi/4)
+        [FieldOffset(0x160)] public float Tilt;
+        [FieldOffset(0x170)] public int Mode; // Camera mode? (0 = 1st person, 1 = 3rd person, 2+ = weird controller mode? cant look up/down)
+        //[FieldOffset(0x174)] public int ControlType; // 0 first person, 1 legacy, 2 standard, 3/5/6 ???, 4 ???
+        [FieldOffset(0x17C)] public float InterpolatedZoom;
+        [FieldOffset(0x1B0)] public float ViewX;
+        [FieldOffset(0x1B4)] public float ViewZ;
+        [FieldOffset(0x1B8)] public float ViewY;
+        //[FieldOffset(0x1E4)] public byte FlipCamera; // 1 while holding the keybind
+        [FieldOffset(0x224)] public float LookAtHeightOffset; // No idea what to call this (0x230 is the interpolated value)
+        [FieldOffset(0x228)] public byte ResetLookatHeightOffset; // No idea what to call this
+        //[FieldOffset(0x230)] public float InterpolatedLookAtHeightOffset;
+        [FieldOffset(0x2B4)] public float LookAtZ2;
+    }
 }

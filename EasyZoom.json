@@ -1,6 +1,7 @@
 ﻿{
   "Name": "EasyZoom",
   "Author": "akira0245",
+  "Punchline": "Easy zoom distance unlock and fov control. /ezoom to open config panel",
   "Description": "Easy zoom distance unlock and fov control. /ezoom to open config panel",
   "RepoUrl": "",
   "Tags": [ "zoom", "akira0245" ]
