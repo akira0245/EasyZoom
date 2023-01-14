@@ -12,7 +12,7 @@ namespace EasyZoom
 		public static Configuration config;
 		private PluginUI ui;
 
-		internal static CameraManager* cameraManager = (CameraManager*)FFXIVClientStructs.FFXIV.Client.Game.Control.CameraManager.Instance();
+		internal static CameraManager* cameraManager = (CameraManager*)FFXIVClientStructs.FFXIV.Client.Game.Control.CameraManager.Instance;
         private static IntPtr CamCollisionJmp;
 		private static IntPtr CamDistanceResetFunc;
 		private static byte[] CamDistanceOriginalBytes = new byte[8];
