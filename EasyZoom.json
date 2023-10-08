@@ -4,6 +4,6 @@
   "Punchline": "Easy zoom distance unlock and fov control. /ezoom to open config panel",
   "Description": "Easy zoom distance unlock and fov control. /ezoom to open config panel",
   "RepoUrl": "https://github.com/akira0245/EasyZoom",
-  "DalamudApiLevel": 8,
+  "DalamudApiLevel": 9,
   "Tags": [ "zoom", "akira" ]
 }
