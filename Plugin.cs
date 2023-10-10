@@ -1,40 +1,46 @@
 ﻿using System;
 using System.Linq;
 using System.Runtime.InteropServices;
+using Dalamud.Game;
 using Dalamud.Hooking;
+using Dalamud.IoC;
 using Dalamud.Plugin;
+using Dalamud.Plugin.Services;
 using DalamudApi;
 
 namespace EasyZoom
 {
 	public unsafe class Plugin : IDalamudPlugin
 	{
-		public static Configuration config;
+
+        [PluginService]
+        public static IGameInteropProvider sigScanner { get; private set; } = null!;
+
+        public static Configuration config;
 		private PluginUI ui;
 
-		internal static CameraManager* cameraManager = (CameraManager*)FFXIVClientStructs.FFXIV.Client.Game.Control.CameraManager.Instance;
+		internal static CameraManager* cameraManager = (CameraManager*)FFXIVClientStructs.FFXIV.Client.Game.Control.CameraManager.Instance();
         private static IntPtr CamCollisionJmp;
 		private static IntPtr CamDistanceResetFunc;
 		private static byte[] CamDistanceOriginalBytes = new byte[8];
+
+        
 
         public static float zoomDelta = 0.75f;
         private delegate float GetZoomDeltaDelegate();
         private static Hook<GetZoomDeltaDelegate> GetZoomDeltaHook;
         private static float GetZoomDeltaDetour()
         {
-            return cam->CurrentZoom * 0.075f;
+            return cam->currentZoom * 0.075f;
         }
 
         public string Name => "EasyZoom";
 
-		public unsafe Plugin(DalamudPluginInterface pluginInterface)
+		public Plugin(DalamudPluginInterface pluginInterface)
 		{
-			api.Initialize(this, pluginInterface);
+            api.Initialize(this, pluginInterface);
 
-            var vtbl = cameraManager->WorldCamera->VTable;
-            GetZoomDeltaHook = new(vtbl[28], GetZoomDeltaDetour); // Client__Game__Camera_vf28
-            GetZoomDeltaHook.Enable();
-
+            SigScanner _si = new SigScanner();
 
             ZeroFloat = Marshal.AllocHGlobal(4);
 			Marshal.StructureToPtr(0f, ZeroFloat, true);
@@ -49,10 +55,11 @@ namespace EasyZoom
 			this.ui = new PluginUI();
 			pluginInterface.UiBuilder.Draw += this.ui.Draw;
 
-			CamCollisionJmp = api.SigScanner.ScanText("0F 84 ?? ?? ?? ?? F3 0F 10 54 24 70 41 B7 01 F3 0F 10 44 24 74");
-			CamDistanceResetFunc = api.SigScanner.ScanText("F3 0F 10 05 ?? ?? ?? ?? EB ?? F3 0F 10 05 ?? ?? ?? ?? F3 0F 10 94 24 B0 00 00 00"); // nop 8 bytes
+			CamCollisionJmp = _si.ScanText("E8 ?? ?? ?? ?? 4C 8D 45 C7 89 83 ?? ?? ?? ??") + 0x1D4;
+			CamDistanceResetFunc = _si.ScanText("F3 0F 10 05 ?? ?? ?? ?? EB ?? F3 0F 10 05 ?? ?? ?? ?? F3 0F 10 94 24 B0 00 00 00"); // nop 8 bytes
 			Marshal.Copy(CamDistanceResetFunc, CamDistanceOriginalBytes, 0, 8);
             
+			
 			api.ClientState.Login += ClientState_OnLogin;
 
 			SetCamDistanceNoReset(true);
@@ -68,9 +75,18 @@ namespace EasyZoom
 			Marshal.StructureToPtr(config.FovMax, FovMax, true);
 			Marshal.StructureToPtr(config.ZoomMin, ZoomMin, true);
 			Marshal.StructureToPtr(config.ZoomMax, ZoomMax, true);
+
+			hook();
 		}
 
-		private void ClientState_OnLogin(object sender, EventArgs e)
+		private void hook()
+		{
+            var vtbl = cameraManager->worldCamera->vtbl;
+            GetZoomDeltaHook = sigScanner.HookFromAddress<GetZoomDeltaDelegate>(vtbl[28], GetZoomDeltaDetour);
+            GetZoomDeltaHook.Enable();
+        }
+
+		private void ClientState_OnLogin()
 		{
 			SetCamDistanceNoReset(true);
 			if (config.NoCollision)
@@ -86,21 +102,16 @@ namespace EasyZoom
 			Marshal.StructureToPtr(config.ZoomMin, ZoomMin, true);
 			Marshal.StructureToPtr(config.ZoomMax, ZoomMax, true);
 		}
-        private static GameCamera* cam => cameraManager->WorldCamera;
+        private static GameCamera* cam => cameraManager->worldCamera;
 
-        public static IntPtr ZoomCurrent => (IntPtr)(&cam->CurrentZoom);
-		public static IntPtr ZoomMin => (IntPtr)(&cam->MinZoom);
-		public static IntPtr ZoomMax => (IntPtr)(&cam->MaxZoom);
-		public static IntPtr FovCurrent => (IntPtr)(&cam->MaxFoV);
-		public static IntPtr FovMin => (IntPtr)(&cam->MinFoV);
-		public static IntPtr FovMax => (IntPtr)(&cam->CurrentFoV);
-        public static IntPtr AngleMin => (IntPtr)(&cam->MinVRotation);
-        public static IntPtr AngleMax => (IntPtr)(&cam->MaxVRotation);
-
-        //public static IntPtr UpDown;
-        //public static IntPtr UpDownMin;
-        //public static IntPtr UpDownMax;
-
+        public static IntPtr ZoomCurrent => (IntPtr)(&cam->currentZoom);
+		public static IntPtr ZoomMin => (IntPtr)(&cam->minZoom);
+		public static IntPtr ZoomMax => (IntPtr)(&cam->maxZoom);
+		public static IntPtr FovCurrent => (IntPtr)(&cam->maxFoV);
+		public static IntPtr FovMin => (IntPtr)(&cam->minFoV);
+		public static IntPtr FovMax => (IntPtr)(&cam->currentFoV);
+        public static IntPtr AngleMin => (IntPtr)(&cam->minVRotation);
+        public static IntPtr AngleMax => (IntPtr)(&cam->maxVRotation);
 
 
         public static IntPtr ZeroFloat;
@@ -262,10 +273,10 @@ namespace EasyZoom
     [StructLayout(LayoutKind.Explicit)]
     internal unsafe struct CameraManager
     {
-        [FieldOffset(0x0)] internal GameCamera* WorldCamera;
-        [FieldOffset(0x8)] internal GameCamera* IdleCamera;
-        [FieldOffset(0x10)] internal GameCamera* MenuCamera;
-        [FieldOffset(0x18)] internal GameCamera* SpectatorCamera;
+        [FieldOffset(0x0)] public GameCamera* worldCamera;
+        [FieldOffset(0x8)] public GameCamera* idleCamera;
+        [FieldOffset(0x10)] public GameCamera* menuCamera;
+        [FieldOffset(0x18)] public GameCamera* spectatorCamera;
     }
 
     /// <summary>
@@ -274,36 +285,39 @@ namespace EasyZoom
     [StructLayout(LayoutKind.Explicit)]
     internal unsafe struct GameCamera
     {
-        [FieldOffset(0x0)] public IntPtr* VTable;
-        [FieldOffset(0x60)] public float X;
-        [FieldOffset(0x64)] public float Z;
-        [FieldOffset(0x68)] public float Y;
-        [FieldOffset(0x90)] public float LookAtX; // Position that the camera is focused on (Actual position when zoom is 0)
-        [FieldOffset(0x94)] public float LookAtZ;
-        [FieldOffset(0x98)] public float LookAtY;
-        [FieldOffset(0x114)] public float CurrentZoom; // 6
-        [FieldOffset(0x118)] public float MinZoom; // 1.5
-        [FieldOffset(0x11C)] public float MaxZoom; // 20
-        [FieldOffset(0x120)] public float CurrentFoV; // 0.78
-        [FieldOffset(0x124)] public float MinFoV; // 0.69
-        [FieldOffset(0x128)] public float MaxFoV; // 0.78
-        [FieldOffset(0x12C)] public float AddedFoV; // 0
-        [FieldOffset(0x130)] public float CurrentHRotation; // -pi -> pi, default is pi
-        [FieldOffset(0x134)] public float CurrentVRotation; // -0.349066
-        //[FieldOffset(0x138)] public float HRotationDelta;
-        [FieldOffset(0x148)] public float MinVRotation; // -1.483530, should be -+pi/2 for straight down/up but camera breaks so use -+1.569
-        [FieldOffset(0x14C)] public float MaxVRotation; // 0.785398 (pi/4)
-        [FieldOffset(0x160)] public float Tilt;
-        [FieldOffset(0x170)] public int Mode; // Camera mode? (0 = 1st person, 1 = 3rd person, 2+ = weird controller mode? cant look up/down)
-        //[FieldOffset(0x174)] public int ControlType; // 0 first person, 1 legacy, 2 standard, 3/5/6 ???, 4 ???
-        [FieldOffset(0x17C)] public float InterpolatedZoom;
-        [FieldOffset(0x1B0)] public float ViewX;
-        [FieldOffset(0x1B4)] public float ViewZ;
-        [FieldOffset(0x1B8)] public float ViewY;
-        //[FieldOffset(0x1E4)] public byte FlipCamera; // 1 while holding the keybind
-        [FieldOffset(0x224)] public float LookAtHeightOffset; // No idea what to call this (0x230 is the interpolated value)
-        [FieldOffset(0x228)] public byte ResetLookatHeightOffset; // No idea what to call this
-        //[FieldOffset(0x230)] public float InterpolatedLookAtHeightOffset;
-        [FieldOffset(0x2B4)] public float LookAtZ2;
+        [FieldOffset(0x0)] public nint* vtbl;
+        [FieldOffset(0x60)] public float x;
+        [FieldOffset(0x64)] public float y;
+        [FieldOffset(0x68)] public float z;
+        [FieldOffset(0x90)] public float lookAtX; // Position that the camera is focused on (Actual position when zoom is 0)
+        [FieldOffset(0x94)] public float lookAtY;
+        [FieldOffset(0x98)] public float lookAtZ;
+        [FieldOffset(0x114)] public float currentZoom; // 6
+        [FieldOffset(0x118)] public float minZoom; // 1.5
+        [FieldOffset(0x11C)] public float maxZoom; // 20
+        [FieldOffset(0x120)] public float currentFoV; // 0.78
+        [FieldOffset(0x124)] public float minFoV; // 0.69
+        [FieldOffset(0x128)] public float maxFoV; // 0.78
+        [FieldOffset(0x12C)] public float addedFoV; // 0
+        [FieldOffset(0x130)] public float currentHRotation; // -pi -> pi, default is pi
+        [FieldOffset(0x134)] public float currentVRotation; // -0.349066
+        [FieldOffset(0x138)] public float hRotationDelta;
+        [FieldOffset(0x148)] public float minVRotation; // -1.483530, should be -+pi/2 for straight down/up but camera breaks so use -+1.569
+        [FieldOffset(0x14C)] public float maxVRotation; // 0.785398 (pi/4)
+        [FieldOffset(0x160)] public float tilt;
+        [FieldOffset(0x170)] public int mode; // Camera mode? (0 = 1st person, 1 = 3rd person, 2+ = weird controller mode? cant look up/down)
+        [FieldOffset(0x174)] public int controlType; // 0 first person, 1 legacy, 2 standard, 4 talking to npc in first person (with option enabled), 5 talking to npc (with option enabled), 3/6 ???
+        [FieldOffset(0x17C)] public float interpolatedZoom;
+        [FieldOffset(0x190)] public float transition; // Seems to be related to the 1st <-> 3rd camera transition
+        [FieldOffset(0x1B0)] public float viewX;
+        [FieldOffset(0x1B4)] public float viewY;
+        [FieldOffset(0x1B8)] public float viewZ;
+        [FieldOffset(0x1E4)] public byte isFlipped; // 1 while holding the keybind
+        [FieldOffset(0x21C)] public float interpolatedY;
+        [FieldOffset(0x224)] public float lookAtHeightOffset; // No idea what to call this (0x230 is the interpolated value)
+        [FieldOffset(0x228)] public byte resetLookatHeightOffset; // No idea what to call this
+        [FieldOffset(0x230)] public float interpolatedLookAtHeightOffset;
+        [FieldOffset(0x2B0)] public byte lockPosition;
+        [FieldOffset(0x2C4)] public float lookAtY2;
     }
 }
